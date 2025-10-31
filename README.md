@@ -46,22 +46,22 @@ At timestep $k$, the model receives the $n$-dimensional $x_k$ and the $M \times 
 Now, **all** controller MLPs receive this **lightweight** $r$-dimensional vector $x_r$ as input.
 
 * **Read Controller:**
-    * `T_r = MLP_R(x_r)`
+    * `T_r = MLP_R(x_r，H_{k-1})`
     * **(Explanation:** Outputs $K_r$ **read positions** `t_read`. Data flow: `r -> K_r`.)
 
 * **Forget Controller:**
-    * `P_f = MLP_F(x_r)`
+    * `P_f = MLP_F(x_r，H_{k-1})`
     * **(Explanation:** Outputs $K_f$ **forget packets**. Each "packet" contains `t_f` (position) and `s_f` (strength). Data flow: `r -> K_f * 2`.)
 
 * **Write & Gate Controllers:**
     * **(Explanation:** This can be one or more MLPs. Since we are now working in the efficient $r$-space, we can afford the "**independent write**" scheme, which is far simpler and more powerful than "low-rank generation".)
-    * `T_w = MLP_W(x_r)`
+    * `T_w = MLP_W(x_r，H_{k-1})`
         * **(Explanation:** Outputs $K_w$ **write positions** `t_write`. Data flow: `r -> K_w`.)
-    * `V_candidates = MLP_V(x_r)`
+    * `V_candidates = MLP_V(x_r，H_{k-1})`
         * **(Explanation:** Outputs $K_w$ **independent** $r$-dimensional "candidate values" `v_c`. Data flow: `r -> K_w * r`. This cost is now acceptable.)
-    * `G_inputs = MLP_I(x_r)`
+    * `G_inputs = MLP_I(x_r，H_{k-1})`
         * **(Explanation:** Outputs $K_w$ **independent** $r$-dimensional "write gates" `g_input`. Data flow: `r -> K_w * r`.)
-    * `g_output = MLP_O(x_r)`
+    * `g_output = MLP_O(x_r，H_{k-1})`
         * **(Explanation:** Outputs **one** $r$-dimensional "read gate" `g_output`. Data flow: `r -> r`.)
 
 #### Stage 3: Execute "Read" Operation
@@ -120,6 +120,58 @@ Retrieve information from $H_{k-1}$ (the $M \times r$ sandbox from the previous 
 * $H_k$ (the new $M \times r$ sandbox) and $y_k$ (the $n$-dimensional output) have been generated.
 * The model advances to timestep $k+1$, passing $H_k$ as $H_{k-1}$ into the next loop.
 
+## Alternatives
+
+### Architecture A: Serial
+
+This solution is a **Recurrent** architecture, and its state update cannot be parallelized across the time dimension.
+
+**1. Core Formula (Controller):**
+The controller's decision **depends on the historical state and the current input**.
+* `h_k = RNN(h_{k-1}, x_k)`
+* `Controls_k = MLP_Control(h_k)`
+
+**2. Mechanism (Serial):**
+At each timestep $k$:
+1.  **RNN Update:** $x_k$ and the previous RNN state $h_{k-1}$ are used to compute the **current RNN state $h_k$**.
+2.  **Controller Decision:** $h_k$ (an "aware" vector containing $x_k$ and a historical summary) is fed into all controller MLPs to generate the complete instructions for the current step (read/write/forget positions, values, and gates).
+3.  **Memory Operation:** The model uses these instructions to perform $K$ read/write/forget operations on the **previous sandbox state $H_{k-1}$** to generate $y_k$ and $H_k$.
+4.  **Advance:** $h_k$ and $H_k$ are passed to step $k+1$.
+
+**3. Advantages (Pros):**
+* **Aware Controller:** The controller is "aware." When making a decision at step $k$, it can access the historical summary from step $k-1$ (via $h_k$).
+* **Solves Write Conflicts:** Because the controller is "aware," it can be trained to perform complex memory management.
+* **High Training Stability:** $h_k$ provides a stable, non-zero "navigation" signal, offering meaningful guidance to the controller from the very first step. This greatly alleviates training difficulties like "Cold Start" and the "Pointer Curse."
+
+**4. Disadvantages (Cons):**
+* **Not Parallelizable:** The architecture is logically strictly serial ($H_k$ depends on $H_{k-1}$, $h_k$ depends on $h_{k-1}$).
+* **Slow Training Speed:** It must be trained using "Backpropagation Through Time" (BPTT), similar to RNNs/LSTMs. Its training throughput on modern GPUs will be far lower than Mamba or Transformer.
+* **High Per-Step Computation Cost:** During inference, each step must serially execute one RNN step *and* all $K$ memory sandbox operations.
+
+### Architecture B: Parallel
+
+This solution is a **Batch** architecture that is mathematically (during training) **parallelizable**.
+
+**1. Core Formula (Controller):**
+The controller's decision **depends only on the current input**.
+* `Controls_k = MLP_Control(x_k)`
+
+**2. Mechanism (Parallel):**
+This solution requires an "**All-Addition**" logic (i.e., the "forget" operation is implemented as "adding a negative vector").
+1.  **Parallel Delta Generation:** All $N$ "controller" `MLP(x_k)` modules run in parallel. Looking only at $x_k$, they generate a "sandbox delta" `H_delta_k` (an $M \times r$ set of add/subtract instructions) for each of the $N$ timesteps.
+2.  **Parallel Scan:** The model uses a "Prefix Sum" algorithm to compute $N$ "causal history snapshots" in parallel.
+    * `H_read_k = H_delta_1 + H_delta_2 + ... + H_delta_k`
+3.  **Parallel Reads:** All $N$ "Read" operations `Read(H_read_k, Controls_k)` run in parallel, generating all $N$ outputs $y_k$.
+
+**3. Advantages (Pros):**
+* **Parallelizable Training:** The architecture (due to its "stateless" controller and "all-addition" operation) is mathematically compatible with parallel scan. This allows it to compete with Mamba in training speed.
+* **Conceptually Simple:** Removes the need for the "second" memory system (the RNN navigator).
+
+**4. Disadvantages (Cons):**
+* **"Blind" Controller:** This is the most critical weakness. At $k=50$, `MLP(x_50)` does not know what happened in the sandbox at $k=10$.
+* **Cannot Dynamically Solve "Write Conflicts":** The controller cannot "check" if an address is already occupied. If `MLP("apple")` and `MLP("orange")` both (blindly) learn to hash to `t=50.6`, they will inevitably be "blended" together (`V_APPLE + V_ORANGE`).
+* **Extremely High Training Difficulty:** The controller must, in a "blind" state, learn a "globally optimal hashing/clustering scheme" based only on $x_k$ and the final loss signal.
+* **"Subtractive Forget" Paradox:** The "blind" "Forget Controller" `MLP_F(x_k)` logically cannot know *which* vector it is supposed to "subtract" (e.g., `V_APPLE`), because it has never "read" the sandbox.
 
 
 # Simulated Smooth RNN
@@ -162,7 +214,7 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 #### 阶段 1：入口投影 (Down-Projection)
 
 * **动作：** 将 $n$ 维的“公共”输入 $x_k$ 转换为 $r$ 维的“内部”工作向量 $x_r$。
-* **计算：** `x_r = MLP_down(x_k)`
+* **计算：** `x_r = MLP_down(x_k，H_{k-1})`
 * **说明：** 这是必须的第一步。$x_k$（$n$ 维）无法直接与 $r$ 维的沙盘 $H$ 交互。我们必须先将其“翻译”成内存核心的“内部语言” $x_r$（$r$ 维）。
 
 #### 阶段 2：并行生成所有“指令”
@@ -170,22 +222,22 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 现在，**所有**的控制器 MLP 都接收这个**轻量级**的 $r$ 维向量 $x_r$ 作为输入。
 
 * **读取控制器 (Read Controller)：**
-    * `T_r = MLP_R(x_r)`
+    * `T_r = MLP_R(x_r，H_{k-1})`
     * **(说明：** 输出 $K_r$ 个**读取位置** `t_read`。数据流：`r -> K_r`。)
 
 * **遗忘控制器 (Forget Controller)：**
-    * `P_f = MLP_F(x_r)`
+    * `P_f = MLP_F(x_r，H_{k-1})`
     * **（说明：** 输出 $K_f$ 个**遗忘包**。每个“包”包含 `t_f` (位置) 和 `s_f` (强度)。数据流：`r -> K_f * 2`。)
 
 * **写入/门控控制器 (Write & Gate Controllers)：**
     * **（说明：** 这可以是一个或多个 MLP。由于我们现在工作在高效的 $r$ 维空间，我们可以负担得起“**独立写入**”方案，这远比“低秩生成”更简单、更强大。)
-    * `T_w = MLP_W(x_r)`
+    * `T_w = MLP_W(x_r，H_{k-1})`
         * **(说明：** 输出 $K_w$ 个**写入位置** `t_write`。数据流：`r -> K_w`。)
-    * `V_candidates = MLP_V(x_r)`
+    * `V_candidates = MLP_V(x_r，H_{k-1})`
         * **（说明：** 输出 $K_w$ 个**独立**的 $r$ 维“候选值” `v_c`。数据流：`r -> K_w * r`。这个成本现在是可接受的。)
-    * `G_inputs = MLP_I(x_r)`
+    * `G_inputs = MLP_I(x_r，H_{k-1})`
         * **（说明：** 输出 $K_w$ 个**独立**的 $r$ 维“写入门” `g_input`。数据流：`r -> K_w * r`。)
-    * `g_output = MLP_O(x_r)`
+    * `g_output = MLP_O(x_r，H_{k-1})`
         * **（说明：** 输出**一个** $r$ 维的“读取门” `g_output`。数据流：`r -> r`。)
 
 #### 阶段 3：执行“读取”操作
@@ -243,3 +295,57 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 #### 阶段 8：推进
 * $H_k$ (新的 $M \times r$ 沙盘) 和 $y_k$ ( $n$ 维输出) 被生成。
 * 模型推进到 $k+1$ 时间步，将 $H_k$ 作为 $H_{k-1}$ 传入下一个循环。
+
+## 可选
+
+### 架构A：串行
+
+此方案是一个循环（Recurrent）架构，其状态更新在时间维度上无法并行化。
+
+**1. 核心公式 (控制器)：**
+控制器的决策**依赖于历史状态和当前输入**。
+* `h_k = RNN(h_{k-1}, x_k)`
+* `Controls_k = MLP_Control(h_{k-1}, x_k)`
+
+**2. 机制 (串行)：**
+在每个时间步 $k$：
+1.  **RNN 更新：** $x_k$ 和上一步的 RNN 状态 $h_{k-1}$ 被用于计算**当前 RNN 状态 $h_k$**。
+2.  **控制器决策：** $h_k$（一个包含了 $x_k$ 和历史摘要的“有感知”的向量）被送入所有控制器 MLP，以生成当前步骤的全部指令（读/写/忘的位置、值和门控）。
+3.  **内存操作：** 模型使用这些指令，对**上一步的沙盘状态 $H_{k-1}$** 执行 $K$ 次读/写/忘操作，以生成 $y_k$ 和 $H_k$。
+4.  **推进：** $h_k$ 和 $H_k$ 被传递给 $k+1$ 步。
+
+**3. 优点 (Pros)：**
+* **有感知的控制器 (Aware Controller)：** 控制器是“有感知”的。它在 $k$ 时刻做决策时，能（通过 $h_k$）获取到 $k-1$ 时刻的历史摘要。
+* **解决写入冲突：** 由于控制器“有感知”，它可以被训练来执行复杂的内存管理。
+* **训练稳定性高：** $h_k$ 提供了一个稳定、非零的“导航”信号，从第一步开始就为控制器提供了有意义的指导。这极大地缓解了“冷启动”（Cold Start）和“指针诅咒”（Pointer Curse）等训练难题。
+
+**4. 缺点 (Cons)：**
+* **不可并行化：** 架构在逻辑上是严格串行的（`H_k` 依赖 `H_{k-1}`，`h_k` 依赖 `h_{k-1}`）。
+* **训练速度慢：** 必须使用（类似于 RNN/LSTM 的）“通过时间反向传播”（BPTT）进行训练，在现代 GPU 上的训练吞吐量远低于 Mamba 或 Transformer。
+* **每步计算成本高：** 在推理时，每一步都必须串行执行一个 RNN 步骤和所有 $K$ 个内存沙盘操作。
+
+
+### 架构B：并行
+
+此方案是一个批处理 (Batch) 架构，它在数学上可以（在训练时）并行化。
+
+**1. 核心公式 (控制器)：**
+控制器的决策**仅依赖于当前输入**。
+* `Controls_k = MLP_Control(x_k)`
+
+**2. 机制 (并行)：**
+此方案需要一个“**全加法**”逻辑（即“遗忘”操作被实现为“加一个负向量”）。
+1.  **并行生成增量 (Deltas)：** 所有 $N$ 个“控制器”`MLP(x_k)` 并行运行。只看 $x_k$，为 $N$ 个时间步中的每一步都生成一个“沙盘增量” `H_delta_k`（一个 $M \times r$ 的加法/减法指令集）。
+2.  **并行扫描 (Scan)：** 模型使用一个“前缀和”（Prefix Sum）算法，并行计算出 $N$ 个“因果历史快照”。
+    * `H_read_k = H_delta_1 + H_delta_2 + ... + H_delta_k`
+3.  **并行读取 (Reads)：** 所有 $N$ 个“读取”操作 `Read(H_read_k, Controls_k)` 并行运行，生成所有 $N$ 个输出 $y_k$。
+
+**3. 优点 (Pros)：**
+* **可并行训练：** 架构（由于其“无状态依赖”的控制器和“全加法”操作）在数学上与“并行扫描”兼容。这使其在训练速度上可以与 Mamba 竞争。
+* **概念上简单：** 移除了对“第二个”记忆系统（RNN 导航仪）的需求。
+
+**4. 缺点 (Cons)：**
+* **“盲目”的控制器 (Blind Controller)：** 这是最致命的弱点。在 $k=50$ 时，`MLP(x_50)` 不知道 $k=10$ 时在沙盘上发生了什么。
+* **无法动态解决“写入冲突”：** 控制器无法“检查”一个地址是否已被占用。如果 `MLP("apple")` 和 `MLP("orange")` 都（盲目地）学会了哈希到 `t=50.6`，它们将不可避免地被“搅拌”在一起（`V_APPLE + V_ORANGE`）。
+* **训练难度极高：** 控制器必须在“盲目”的情况下，仅凭 $x_k$ 和最终的“损失信号”，就学会一个“全局最优的哈希/聚类方案”。
+* **“减法遗忘”的悖论：** “盲目”的“遗忘控制器” `MLP_F(x_k)` 在逻辑上无法知道它应该去“减”哪个向量（例如 `V_APPLE`），因为它从未“读取”过沙盘。
