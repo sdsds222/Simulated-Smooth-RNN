@@ -68,8 +68,7 @@ Now, **all** controller MLPs receive this **lightweight** $r$-dimensional vector
 
 Retrieve information from $H_{k-1}$ (the $M \times r$ sandbox from the previous step).
 
-1.  Initialize an $r$-dimensional aggregate vector `v_agg` to zero.
-2.  **For each read position $t_r$ in $T_r$:**
+**For each read position $t_r$ in $T_r$:**
     * **Compute weights:** `i_floor = floor(t_r)`, `i_ceil = ceil(t_r)`.
     * `w_floor = 1.0 - (t_r - i_floor)`, `w_ceil = t_r - i_floor`.
     * **Interpolated Read:** `v_r = H_{k-1}[i_floor] * w_floor + H_{k-1}[i_ceil] * w_ceil`
@@ -86,7 +85,7 @@ Retrieve information from $H_{k-1}$ (the $M \times r$ sandbox from the previous 
 
 #### Stage 5: Exit Projection (Up-Projection)
 
-* **Action:** Convert the $r$-dimensional "internal result" $y_r$ back into an $n$-dimensional "public" output $y_k$.
+* **Action:** Convert "internal result" $y_cat$ back into an $n$-dimensional "public" output $y_k$.
 * After gating, take y_cat with shape K_r*r, feed it to MLP_up, and map to n to obtain y_k.
 
 #### Stage 6: Execute "Forget" Operation
@@ -253,8 +252,7 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 
 从 $H_{k-1}$ （上一步的 $M \times r$ 沙盘）中检索信息。
 
-1.  初始化一个 $r$ 维的聚合向量 `v_agg` 为零。
-2.  **对于 $T_r$ 中的每一个读取位置 $t_r$：**
+**对于 $T_r$ 中的每一个读取位置 $t_r$：**
     * **计算权重：** `i_floor = floor(t_r)`, `i_ceil = ceil(t_r)`。
     * `w_floor = 1.0 - (t_r - i_floor)`, `w_ceil = t_r - i_floor`。
     * **插值读取：** `v_r = H_{k-1}[i_floor] * w_floor + H_{k-1}[i_ceil] * w_ceil`
@@ -271,7 +269,7 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 
 #### 阶段 5：出口投影 (Up-Projection)
 
-* **动作：** 将 $r$ 维的“内部结果” $y_r$ 转换回 $n$ 维的“公共”输出 $y_k$。
+* **动作：** 将 “内部结果” $y_cat$ 转换回 $n$ 维的“公共”输出 $y_k$。
 * 门控后向量 y_cat 维度 K_r*r
 * 送入 MLP_up 映射到维度 n 得到 y_k
 
