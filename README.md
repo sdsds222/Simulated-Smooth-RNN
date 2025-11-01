@@ -38,7 +38,7 @@ At timestep $k$, the model receives the $n$-dimensional $x_k$ and the $M \times 
 #### Stage 1: Entrance Projection (Down-Projection)
 
 * **Action:** Convert the $n$-dimensional "public" input $x_k$ into an $r$-dimensional "internal" working vector $x_r$.
-* **Computation:** `x_r = MLP_down(x_k)`
+* **Computation:** `x_r = MLP_down(x_k，H_{k-1})`
 * **Explanation:** This is a mandatory first step. $x_k$ ($n$-dim) cannot directly interact with the $r$-dim sandbox $H$. We must first "translate" it into the memory core's "internal language" $x_r$ ($r$-dim).
 
 #### Stage 2: Parallel Generation of All "Instructions"
@@ -61,8 +61,8 @@ Now, **all** controller MLPs receive this **lightweight** $r$-dimensional vector
         * **(Explanation:** Outputs $K_w$ **independent** $r$-dimensional "candidate values" `v_c`. Data flow: `r -> K_w * r`. This cost is now acceptable.)
     * `G_inputs = MLP_I(x_r，H_{k-1})`
         * **(Explanation:** Outputs $K_w$ **independent** $r$-dimensional "write gates" `g_input`. Data flow: `r -> K_w * r`.)
-    * `g_output = MLP_O(x_r，H_{k-1})`
-        * **(Explanation:** Outputs **one** $r$-dimensional "read gate" `g_output`. Data flow: `r -> r`.)
+    * `g_read = MLP_O(x_r，H_{k-1})`
+        * **(Explanation:** Outputs **one**  "read gate" `g_read`. )
 
 #### Stage 3: Execute "Read" Operation
 
@@ -80,7 +80,7 @@ Retrieve information from $H_{k-1}$ (the $M \times r$ sandbox from the previous 
 #### Stage 4: Generate "Internal Output"
 
 * **Action:** Filter the retrieved information using the "read gate".
-* Read gate: `g_read = MLP_O(z_k)` with shape `K_r * r`, range `[0, 1]`.
+* Read gate: use `g_read` generated in Stage 2 with shape `K_r * r`, range `[0, 1]`.
 * Elementwise gating: `y_cat = v_cat * g_read`.
 
 #### Stage 5: Exit Projection (Up-Projection)
@@ -245,8 +245,8 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
         * **（说明：** 输出 $K_w$ 个**独立**的 $r$ 维“候选值” `v_c`。数据流：`r -> K_w * r`。这个成本现在是可接受的。)
     * `G_inputs = MLP_I(x_r，H_{k-1})`
         * **（说明：** 输出 $K_w$ 个**独立**的 $r$ 维“写入门” `g_input`。数据流：`r -> K_w * r`。)
-    * `g_output = MLP_O(x_r，H_{k-1})`
-        * **（说明：** 输出**一个** $r$ 维的“读取门” `g_output`。数据流：`r -> r`。)
+    * `g_read = MLP_O(x_r，H_{k-1})`
+        * **（说明：** 输出**一个** $r$ 维的“读取门” `g_read`)
 
 #### 阶段 3：执行“读取”操作
 
@@ -264,7 +264,7 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 #### 阶段 4：生成“内部输出”
 
 * **动作：** 使用“读取门”过滤检索到的信息。
-* 读取门：`g_read = MLP_O(z_k)`，形状 `K_r * r`，范围 `[0,1]`。
+* 读取门：使用阶段二的`g_read`，形状 `K_r * r`，范围 `[0,1]`。
 * 逐元素门控：`y_cat = v_cat * g_read`。
 
 #### 阶段 5：出口投影 (Up-Projection)
