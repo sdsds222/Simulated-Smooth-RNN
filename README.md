@@ -62,7 +62,7 @@ Now, **all** controller MLPs receive this **lightweight** $r$-dimensional vector
     * `G_inputs = MLP_I(x_r，H_{k-1})`
         * **(Explanation:** Outputs $K_w$ **independent** $r$-dimensional "write gates" `g_input`. Data flow: `r -> K_w * r`.)
     * `g_read = MLP_O(x_r，H_{k-1})`
-        * **(Explanation:** Outputs **one**  "read gate" `g_read`. )
+        * **(Explanation:** Outputs **one**  "read gate" `g_read`. K_r * r)
 
 #### Stage 3: Execute "Read" Operation
 
@@ -246,7 +246,7 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
     * `G_inputs = MLP_I(x_r，H_{k-1})`
         * **（说明：** 输出 $K_w$ 个**独立**的 $r$ 维“写入门” `g_input`。数据流：`r -> K_w * r`。)
     * `g_read = MLP_O(x_r，H_{k-1})`
-        * **（说明：** 输出**一个** $r$ 维的“读取门” `g_read`)
+        * **（说明：** 输出**一个** $r$ 维的“读取门” `g_read`，K_r * r)
 
 #### 阶段 3：执行“读取”操作
 
