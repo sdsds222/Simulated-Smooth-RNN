@@ -128,12 +128,46 @@ For each read position t_r in T_r:
     * (Explanation: This is an r-dimensional vector addition, very fast. All K_w head writes are accumulated.)
 
 #### Stage 9: Advance
+
 * H_k (the new M x r sandbox) and y_k (the n-dimensional output) have been generated.
 * The model advances to timestep k+1, passing H_k as H_{k-1} into the next loop.
 
 ## Alternatives
 
-### Architecture A: RNN Instruction
+### Slot Coordinate Channel
+
+Goal: Introduce position awareness to the addressable sandbox while keeping per-step O(1) controller decisions and without feeding the whole H into the controller, thus breaking slot permutation symmetry. This is adapted to the sampling-based input mechanism where sampling points are generated after down-projection.
+
+Method: For each slot i in {0,...,M-1}, predefine a fixed coordinate embedding
+
+e_i = PE(i/M) in R^{d_pos}
+
+(sinusoidal positional encoding, polynomial basis, or a small learnable table). Use it to enhance the sampled values during the sampling process from H_{k-1}.
+
+Position-aware sampling (with coordinates):
+
+During Stage 2.5 (Sample from H), for each sampled value v_s at position t_s, compute an enhanced sampled value by incorporating the interpolated position embedding: e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s)), then concat(v_s, e_s) to form position-aware samples.
+
+Stack the enhanced samples: V_sample_enhanced = stack([concat(v_s, e_s) for each t_s]), then flatten to v_sample_cat with shape K_s * (r + d_pos).
+
+Controller input:
+Feed concat(x_r, v_sample_cat) (now including position embeddings) only to the decision MLPs (read/write/forget/gating), e.g.:
+
+[t_r, t_w, g_read, g_write, s_f] = MLP_ctrl( concat(x_r, v_sample_cat) )
+
+The produced addresses/gates implicitly carry global position statistics through the enhanced sampled context, avoiding “blind addressing.”
+
+## Valley-Shaped Updates Technical Features
+
+While keeping **O(1)** per-step control complexity, use a **local nonlinear “valley-shaped” kernel** for multi-slot read/write/forget, balancing **robust addressing** and **trainability**.
+
+### 1 Core Mechanisms
+
+* **Valley-shaped Local Updates (Nonlinear Local Kernel):** Instead of affecting only the floor/ceil pair, read/write/forget operate within a **small window (w)** using a nonlinear kernel (Gaussian/Mexican-hat/soft-top-k) to distribute weights—providing **jitter-resistant addressing**, **conflict mitigation**, and smoother gradients.
+* **Narrow Read, Wide Write (Optional):** Keep two-/three-point reads for resolution; use valley-shaped updates for write/forget to improve robustness.
+
+
+### RNN Instruction
 
 1. Controller update
    Use an RNN to take the previous hidden state and the current input to produce h_k
@@ -167,8 +201,8 @@ For each read position t_r in T_r:
 9. Advance the timeline
    Output y_k
    Update the states to H_k and h_k
-
-### Architecture B: Parallel
+   
+### Parallel
 
 This solution is a Batch architecture that is mathematically (during training) parallelizable.
 
@@ -192,30 +226,6 @@ This solution requires an "All-Addition" logic (i.e., the "forget" operation is 
 * Cannot Dynamically Solve "Write Conflicts": The controller cannot "check" if an address is already occupied. If MLP("apple") and MLP("orange") both (blindly) learn to hash to t=50.6, they will inevitably be "blended" together (V_APPLE + V_ORANGE).
 * Extremely High Training Difficulty: The controller must, in a "blind" state, learn a "globally optimal hashing/clustering scheme" based only on x_k and the final loss signal.
 * "Subtractive Forget" Paradox: The "blind" "Forget Controller" MLP_F(x_k) logically cannot know which vector it is supposed to "subtract" (e.g., V_APPLE), because it has never "read" the sandbox.
-
-
-### Slot Coordinate Channel
-
-Goal: Introduce position awareness to the addressable sandbox while keeping per-step O(1) controller decisions and without feeding the whole H into the controller, thus breaking slot permutation symmetry. This is adapted to the sampling-based input mechanism where sampling points are generated after down-projection.
-
-Method: For each slot i in {0,...,M-1}, predefine a fixed coordinate embedding
-
-e_i = PE(i/M) in R^{d_pos}
-
-(sinusoidal positional encoding, polynomial basis, or a small learnable table). Use it to enhance the sampled values during the sampling process from H_{k-1}.
-
-Position-aware sampling (with coordinates):
-
-During Stage 2.5 (Sample from H), for each sampled value v_s at position t_s, compute an enhanced sampled value by incorporating the interpolated position embedding: e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s)), then concat(v_s, e_s) to form position-aware samples.
-
-Stack the enhanced samples: V_sample_enhanced = stack([concat(v_s, e_s) for each t_s]), then flatten to v_sample_cat with shape K_s * (r + d_pos).
-
-Controller input:
-Feed concat(x_r, v_sample_cat) (now including position embeddings) only to the decision MLPs (read/write/forget/gating), e.g.:
-
-[t_r, t_w, g_read, g_write, s_f] = MLP_ctrl( concat(x_r, v_sample_cat) )
-
-The produced addresses/gates implicitly carry global position statistics through the enhanced sampled context, avoiding “blind addressing.”
 
 
 # Simulated Smooth RNN
@@ -355,6 +365,64 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 
 ## 可选
 
+### 槽位坐标通道
+
+目标: 在不把整个 H 喂给控制器、且保持每步 O(1) 决策的前提下，为可寻址沙盘引入位置感，打破槽位的置换对称性。此方案适应于基于采样的输入机制，其中采样点在降维后生成。
+
+做法: 对每个槽位 i in {0,...,M-1}，预先定义固定的坐标嵌入
+
+e_i = PE(i/M) in R^{d_pos}
+
+（可用正弦位置编码、多项式基，或小型可学习表）。该嵌入用于增强从 H_{k-1} 的采样过程中的采样值。
+
+带坐标的位置感采样:
+
+在阶段 2.5（从 H 中采样）期间，对于每个在位置 t_s 的采样值 v_s，通过融入插值的坐标嵌入来计算增强的采样值：e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s))，然后 concat(v_s, e_s) 以形成位置感知采样。
+
+堆叠增强采样：V_sample_enhanced = stack([concat(v_s, e_s) for each t_s])，然后展平为 v_sample_cat，形状 K_s * (r + d_pos)。
+
+控制器输入:
+仅将 concat(x_r, v_sample_cat) （现在包含位置嵌入）喂给各决策 MLP（读/写/忘/门控），例如：
+
+[t_r, t_w, g_read, g_write, s_f] = MLP_ctrl( concat(x_r, v_sample_cat) )
+
+如此生成的地址/门控通过增强的采样上下文已隐含全局的位置统计，避免“盲寻址”。
+
+
+## 波谷更新技术特征
+
+在保持每步 **O(1)** 控制复杂度的前提下，用**局部非线性‘波谷式’核**进行多槽位读/写/遗忘，兼顾**稳健寻址**与**可训练性**。
+
+### 1 核心机制
+
+* **波谷式局部更新（Nonlinear Local Kernel）**：读/写/忘不再只作用于 floor/ceil 两槽，而在**小窗口 (w)** 内按非线性核（高斯/Mexican-hat/soft-top-k）分配权重，**抗寻址抖动、抗冲突**，梯度更平滑。
+* **读窄写宽（可选）**：读路径保持两点/三点以保分辨；写/忘用波谷式以增稳健。
+
+### 架构B：并行
+
+此方案是一个批处理 (Batch) 架构，它在数学上可以（在训练时）并行化。
+
+1. 核心公式 (控制器)：
+控制器的决策仅依赖于当前输入。
+* Controls_k = MLP_Control(x_k)
+
+2. 机制 (并行)：
+此方案需要一个“全加法”逻辑（即“遗忘”操作被实现为“加一个负向量”）。
+1.  并行生成增量 (Deltas)： 所有 N 个“控制器”MLP(x_k) 并行运行。只看 x_k，为 N 个时间步中的每一步都生成一个“沙盘增量” H_delta_k（一个 M x r 的加法/减法指令集）。
+2.  并行扫描 (Scan)： 模型使用一个“前缀和”（Prefix Sum）算法，并行计算出 N 个“因果历史快照”。
+    * H_read_k = H_delta_1 + H_delta_2 + ... + H_delta_k
+3.  并行读取 (Reads)： 所有 N 个“读取”操作 Read(H_read_k, Controls_k) 并行运行，生成所有 N 个输出 y_k。
+
+3. 优点 (Pros)：
+* 可并行训练： 架构（由于其“无状态依赖”的控制器和“全加法”操作）在数学上与“并行扫描”兼容。这使其在训练速度上可以与 Mamba 竞争。
+* 概念上简单： 移除了对“第二个”记忆系统（RNN 导航仪）的需求。
+
+4. 缺点 (Cons)：
+* “盲目”的控制器 (Blind Controller)： 这是最致命的弱点。在 k=50 时，MLP(x_50) 不知道 k=10 时在沙盘上发生了什么。
+* 无法动态解决“写入冲突”： 控制器无法“检查”一个地址是否已被占用。如果 MLP("apple") 和 MLP("orange") 都（盲目地）学会了哈希到 t=50.6，它们将不可避免地被“搅拌”在一起（V_APPLE + V_ORANGE）。
+* 训练难度极高： 控制器必须在“盲目”的情况下，仅凭 x_k 和最终的“损失信号”，就学会一个“全局最优的哈希/聚类方案”。
+* “减法遗忘”的悖论： “盲目”的“遗忘控制器” MLP_F(x_k) 在逻辑上无法知道它应该去“减”哪个向量（例如 V_APPLE），因为它从未“读取”过沙盘。
+
 ### 架构A：RNN指导
  
 1. 控制器更新
@@ -390,55 +458,3 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
    输出 y_k
    状态更新为 H_k 与 h_k
 
-
-### 架构B：并行
-
-此方案是一个批处理 (Batch) 架构，它在数学上可以（在训练时）并行化。
-
-1. 核心公式 (控制器)：
-控制器的决策仅依赖于当前输入。
-* Controls_k = MLP_Control(x_k)
-
-2. 机制 (并行)：
-此方案需要一个“全加法”逻辑（即“遗忘”操作被实现为“加一个负向量”）。
-1.  并行生成增量 (Deltas)： 所有 N 个“控制器”MLP(x_k) 并行运行。只看 x_k，为 N 个时间步中的每一步都生成一个“沙盘增量” H_delta_k（一个 M x r 的加法/减法指令集）。
-2.  并行扫描 (Scan)： 模型使用一个“前缀和”（Prefix Sum）算法，并行计算出 N 个“因果历史快照”。
-    * H_read_k = H_delta_1 + H_delta_2 + ... + H_delta_k
-3.  并行读取 (Reads)： 所有 N 个“读取”操作 Read(H_read_k, Controls_k) 并行运行，生成所有 N 个输出 y_k。
-
-3. 优点 (Pros)：
-* 可并行训练： 架构（由于其“无状态依赖”的控制器和“全加法”操作）在数学上与“并行扫描”兼容。这使其在训练速度上可以与 Mamba 竞争。
-* 概念上简单： 移除了对“第二个”记忆系统（RNN 导航仪）的需求。
-
-4. 缺点 (Cons)：
-* “盲目”的控制器 (Blind Controller)： 这是最致命的弱点。在 k=50 时，MLP(x_50) 不知道 k=10 时在沙盘上发生了什么。
-* 无法动态解决“写入冲突”： 控制器无法“检查”一个地址是否已被占用。如果 MLP("apple") 和 MLP("orange") 都（盲目地）学会了哈希到 t=50.6，它们将不可避免地被“搅拌”在一起（V_APPLE + V_ORANGE）。
-* 训练难度极高： 控制器必须在“盲目”的情况下，仅凭 x_k 和最终的“损失信号”，就学会一个“全局最优的哈希/聚类方案”。
-* “减法遗忘”的悖论： “盲目”的“遗忘控制器” MLP_F(x_k) 在逻辑上无法知道它应该去“减”哪个向量（例如 V_APPLE），因为它从未“读取”过沙盘。
-
-
-
-
-
-### 槽位坐标通道
-
-目标: 在不把整个 H 喂给控制器、且保持每步 O(1) 决策的前提下，为可寻址沙盘引入位置感，打破槽位的置换对称性。此方案适应于基于采样的输入机制，其中采样点在降维后生成。
-
-做法: 对每个槽位 i in {0,...,M-1}，预先定义固定的坐标嵌入
-
-e_i = PE(i/M) in R^{d_pos}
-
-（可用正弦位置编码、多项式基，或小型可学习表）。该嵌入用于增强从 H_{k-1} 的采样过程中的采样值。
-
-带坐标的位置感采样:
-
-在阶段 2.5（从 H 中采样）期间，对于每个在位置 t_s 的采样值 v_s，通过融入插值的坐标嵌入来计算增强的采样值：e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s))，然后 concat(v_s, e_s) 以形成位置感知采样。
-
-堆叠增强采样：V_sample_enhanced = stack([concat(v_s, e_s) for each t_s])，然后展平为 v_sample_cat，形状 K_s * (r + d_pos)。
-
-控制器输入:
-仅将 concat(x_r, v_sample_cat) （现在包含位置嵌入）喂给各决策 MLP（读/写/忘/门控），例如：
-
-[t_r, t_w, g_read, g_write, s_f] = MLP_ctrl( concat(x_r, v_sample_cat) )
-
-如此生成的地址/门控通过增强的采样上下文已隐含全局的位置统计，避免“盲寻址”。
