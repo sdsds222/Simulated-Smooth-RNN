@@ -122,31 +122,40 @@ Retrieve information from $H_{k-1}$ (the $M \times r$ sandbox from the previous 
 
 ## Alternatives
 
-### Architecture A: Serial
+### Architecture A: RNN Instruction
 
-This solution is a **Recurrent** architecture, and its state update cannot be parallelized across the time dimension.
+1. Controller update
+   Use an RNN to take the previous hidden state and the current input to produce h_k
 
-**1. Core Formula (Controller):**
-The controller's decision **depends on the historical state and the current input**.
-* `h_k = RNN(h_{k-1}, x_k)`
-* `Controls_k = MLP_Control(h_k)`
+2. Downward mapping
+   Use an MLP to map the external input x_k into the internal vector x_r
 
-**2. Mechanism (Serial):**
-At each timestep $k$:
-1.  **RNN Update:** $x_k$ and the previous RNN state $h_{k-1}$ are used to compute the **current RNN state $h_k$**.
-2.  **Controller Decision:** $h_k$ (an "aware" vector containing $x_k$ and a historical summary) is fed into all controller MLPs to generate the complete instructions for the current step (read/write/forget positions, values, and gates).
-3.  **Memory Operation:** The model uses these instructions to perform $K$ read/write/forget operations on the **previous sandbox state $H_{k-1}$** to generate $y_k$ and $H_k$.
-4.  **Advance:** $h_k$ and $H_k$ are passed to step $k+1$.
+3. Assemble control context
+   Concatenate x_r and h_k to obtain z_k as the control-signal input
 
-**3. Advantages (Pros):**
-* **Aware Controller:** The controller is "aware." When making a decision at step $k$, it can access the historical summary from step $k-1$ (via $h_k$).
-* **Solves Write Conflicts:** Because the controller is "aware," it can be trained to perform complex memory management.
-* **High Training Stability:** $h_k$ provides a stable, non-zero "navigation" signal, offering meaningful guidance to the controller from the very first step. This greatly alleviates training difficulties like "Cold Start" and the "Pointer Curse."
+4. Generate read instructions
+   Use MLP_R to output the list of continuous read coordinates T_r from z_k
+   Use MLP_O to output the read gate g_out from z_k
 
-**4. Disadvantages (Cons):**
-* **Not Parallelizable:** The architecture is logically strictly serial ($H_k$ depends on $H_{k-1}$, $h_k$ depends on $h_{k-1}$).
-* **Slow Training Speed:** It must be trained using "Backpropagation Through Time" (BPTT), similar to RNNs/LSTMs. Its training throughput on modern GPUs will be far lower than Mamba or Transformer.
-* **High Per-Step Computation Cost:** During inference, each step must serially execute one RNN step *and* all $K$ memory sandbox operations.
+5. Execute read
+   For each coordinate t_r, perform linear interpolation on the two adjacent slots of the sandbox H to obtain the read value
+   Aggregate the read values and use g_out for elementwise gating to obtain y_r
+   Use MLP_up to up-project y_r to obtain y_k
+
+6. Generate forget instructions
+   Use MLP_F_pos to output the list of continuous forget coordinates T_f from z_k
+   Use MLP_F_str to output the forget strength S_f from z_k
+
+7. Execute forget
+   For each coordinate t_f, apply elementwise multiplicative decay on the two adjacent slots to obtain the temporary sandbox H_tmp
+
+8. Execute write
+   Keep the original write path
+   Perform two-point interpolated additive writes on H_tmp to obtain H_k
+
+9. Advance the timeline
+   Output y_k
+   Update the states to H_k and h_k
 
 ### Architecture B: Parallel
 
@@ -298,31 +307,40 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 
 ## 可选
 
-### 架构A：串行
+### 架构A：RNN指导
+ 
+1. 控制器更新
+   用 RNN 接收上一步隐藏态与本步输入生成 h_k
 
-此方案是一个循环（Recurrent）架构，其状态更新在时间维度上无法并行化。
+2. 降维映射
+   用 MLP 把外部输入 x_k 映射为内部向量 x_r
 
-**1. 核心公式 (控制器)：**
-控制器的决策**依赖于历史状态和当前输入**。
-* `h_k = RNN(h_{k-1}, x_k)`
-* `Controls_k = MLP_Control(h_{k-1}, x_k)`
+3. 组装控制上下文
+   将 x_r 与 h_k 拼接得到 z_k 作为控制信号输入
 
-**2. 机制 (串行)：**
-在每个时间步 $k$：
-1.  **RNN 更新：** $x_k$ 和上一步的 RNN 状态 $h_{k-1}$ 被用于计算**当前 RNN 状态 $h_k$**。
-2.  **控制器决策：** $h_k$（一个包含了 $x_k$ 和历史摘要的“有感知”的向量）被送入所有控制器 MLP，以生成当前步骤的全部指令（读/写/忘的位置、值和门控）。
-3.  **内存操作：** 模型使用这些指令，对**上一步的沙盘状态 $H_{k-1}$** 执行 $K$ 次读/写/忘操作，以生成 $y_k$ 和 $H_k$。
-4.  **推进：** $h_k$ 和 $H_k$ 被传递给 $k+1$ 步。
+4. 生成读取指令
+   用 MLP_R 由 z_k 输出连续读取坐标列表 T_r
+   用 MLP_O 由 z_k 输出读取门 g_out
 
-**3. 优点 (Pros)：**
-* **有感知的控制器 (Aware Controller)：** 控制器是“有感知”的。它在 $k$ 时刻做决策时，能（通过 $h_k$）获取到 $k-1$ 时刻的历史摘要。
-* **解决写入冲突：** 由于控制器“有感知”，它可以被训练来执行复杂的内存管理。
-* **训练稳定性高：** $h_k$ 提供了一个稳定、非零的“导航”信号，从第一步开始就为控制器提供了有意义的指导。这极大地缓解了“冷启动”（Cold Start）和“指针诅咒”（Pointer Curse）等训练难题。
+5. 执行读取
+   对每个坐标 t_r 在沙盘 H 的相邻两格做线性插值得到读值
+   聚合读值并用 g_out 做逐元素门控得到 y_r
+   用 MLP_up 将 y_r 升维得到 y_k
 
-**4. 缺点 (Cons)：**
-* **不可并行化：** 架构在逻辑上是严格串行的（`H_k` 依赖 `H_{k-1}`，`h_k` 依赖 `h_{k-1}`）。
-* **训练速度慢：** 必须使用（类似于 RNN/LSTM 的）“通过时间反向传播”（BPTT）进行训练，在现代 GPU 上的训练吞吐量远低于 Mamba 或 Transformer。
-* **每步计算成本高：** 在推理时，每一步都必须串行执行一个 RNN 步骤和所有 $K$ 个内存沙盘操作。
+6. 生成遗忘指令
+   用 MLP_F_pos 由 z_k 输出连续遗忘坐标列表 T_f
+   用 MLP_F_str 由 z_k 输出遗忘强度 S_f
+
+7. 执行遗忘
+   对每个坐标 t_f 在相邻两格做逐元素乘性衰减得到临时沙盘 H_tmp
+
+8. 执行写入
+   维持原有写入路径
+   在 H_tmp 上做两点插值的加法写入得到 H_k
+
+9. 推进时序
+   输出 y_k
+   状态更新为 H_k 与 h_k
 
 
 ### 架构B：并行
