@@ -182,6 +182,37 @@ This solution requires an "**All-Addition**" logic (i.e., the "forget" operation
 * **"Subtractive Forget" Paradox:** The "blind" "Forget Controller" `MLP_F(x_k)` logically cannot know *which* vector it is supposed to "subtract" (e.g., `V_APPLE`), because it has never "read" the sandbox.
 
 
+### Slot Coordinate Channel
+
+**Goal**: Introduce *position awareness* to the addressable sandbox while keeping per-step **O(1)** controller decisions and without feeding the whole H into the controller, thus breaking slot permutation symmetry.
+
+**Method**: For each slot i in {0,...,M-1}, predefine a fixed coordinate embedding
+
+e_i = PE(i/M) in R^{d_pos}
+
+
+(sinusoidal positional encoding, polynomial basis, or a small learnable table). Use it **only** to build the **position-aware summary** s(H).
+
+**Position-aware summary (with coordinates)**:
+
+
+s(H) = Pool( phi( concat(H[i], e_i) ) ) in R^{d_s}
+
+
+* `concat(H[i], e_i)` is channel-wise concatenation;
+* `phi(.)` is a light per-slot MLP or linear+nonlinearity;
+* `Pool(.)` is global mean/max, or attention pooling (still constant-cost if using a fixed number of probes/centroids).
+
+**Controller input**:
+Feed **concat(x_r, s(H))** only to the decision MLPs (read/write/forget/gating), e.g.:
+
+
+[t_r, t_w, g_read, g_write, s_f] = MLP_ctrl( concat(x_r, s(H)) )
+
+
+The produced addresses/gates implicitly carry global **position statistics**, avoiding “blind addressing.”
+
+
 # Simulated Smooth RNN
 
 Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。其核心创新是一种内存机制，它以恒定的 O(1) 计算成本实现了灵活的、连续空间的寻址能力。SS-RNN 使用一个控制器为其多头读/写系统生成浮点数地址（例如 50.6）。这些“平滑”(Smooth) 的地址继而通过一个可微分的线性插值操作进行“模拟”(Simulated)，该操作仅与两个最近的离散内存槽位交互，即可执行所有内存动作。
@@ -366,3 +397,38 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 * **无法动态解决“写入冲突”：** 控制器无法“检查”一个地址是否已被占用。如果 `MLP("apple")` 和 `MLP("orange")` 都（盲目地）学会了哈希到 `t=50.6`，它们将不可避免地被“搅拌”在一起（`V_APPLE + V_ORANGE`）。
 * **训练难度极高：** 控制器必须在“盲目”的情况下，仅凭 $x_k$ 和最终的“损失信号”，就学会一个“全局最优的哈希/聚类方案”。
 * **“减法遗忘”的悖论：** “盲目”的“遗忘控制器” `MLP_F(x_k)` 在逻辑上无法知道它应该去“减”哪个向量（例如 `V_APPLE`），因为它从未“读取”过沙盘。
+
+
+
+
+
+### 槽位坐标通道
+
+**目标**: 在不把整个 H 喂给控制器、且保持每步 **O(1)** 决策的前提下，为可寻址沙盘引入*位置感*，打破槽位的置换对称性。
+
+**做法**: 对每个槽位 i in {0,...,M-1}，预先定义固定的坐标嵌入
+
+
+e_i = PE(i/M) in R^{d_pos}
+
+
+（可用正弦位置编码、多项式基，或小型可学习表）。该嵌入**仅**用于构造带位置感的摘要 s(H)。
+
+**带坐标的位置感摘要**:
+
+
+s(H) = Pool( phi( concat(H[i], e_i) ) ) in R^{d_s}
+
+
+* `concat(H[i], e_i)` 表示通道拼接；
+* `phi(.)` 可为逐槽位的轻量 MLP 或线性+非线性；
+* `Pool(.)` 可用全局平均/最大，或注意力汇聚（若使用固定数量的探针/中心，仍可保持常数开销）。
+
+**控制器输入**:
+仅将 **concat(x_r, s(H))** 喂给各决策 MLP（读/写/忘/门控），例如：
+
+
+[t_r, t_w, g_read, g_write, s_f] = MLP_ctrl( concat(x_r, s(H)) )
+
+
+如此生成的地址/门控已隐含全局的**位置统计**，避免“盲寻址”。
