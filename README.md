@@ -74,20 +74,20 @@ Retrieve information from $H_{k-1}$ (the $M \times r$ sandbox from the previous 
     * `w_floor = 1.0 - (t_r - i_floor)`, `w_ceil = t_r - i_floor`.
     * **Interpolated Read:** `v_r = H_{k-1}[i_floor] * w_floor + H_{k-1}[i_ceil] * w_ceil`
     * **(Explanation:** This is a weighted sum of $r$-dimensional vectors, very fast.)
-    * **Aggregate:** `v_agg = v_agg + v_r`.
-3.  **(Explanation:** `v_agg` is now $r$-dimensional, representing all "raw clues" retrieved from memory.)
+* For each (t_r \in T_r): compute two-point interpolated read (v^{(j)}\in \mathbb{R}^r) from (H_{k-1}) using floor/ceil and linear weights.
+* Stack reads: `V_stack = [v^(1), ..., v^(K_r)]` with shape `[K_r, r]`.
+* Concatenate: `v_cat = reshape(V_stack, K_r * r)`.
 
 #### Stage 4: Generate "Internal Output"
 
 * **Action:** Filter the retrieved information using the "read gate".
-* **Computation:** `y_r = v_agg * g_output` (element-wise multiplication).
-* **(Explanation:** `y_r` is an $r$-dimensional vector, representing the memory core's "final thought" at timestep $k$.)
+* Read gate: `g_read = MLP_O(z_k)` with shape `K_r * r`, range `[0, 1]`.
+* Elementwise gating: `y_cat = v_cat * g_read`.
 
 #### Stage 5: Exit Projection (Up-Projection)
 
 * **Action:** Convert the $r$-dimensional "internal result" $y_r$ back into an $n$-dimensional "public" output $y_k$.
-* **Computation:** `y_k = MLP_up(y_r)`
-* **(Explanation:** $y_k$ is the **final output** of this unit at timestep $k$. It is now $n$-dimensional and can be used by the next layer (if stacked) or the final prediction head (Softmax).)
+* After gating, take y_cat with shape K_r*r, feed it to MLP_up, and map to n to obtain y_k.
 
 #### Stage 6: Execute "Forget" Operation
 
@@ -259,20 +259,21 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
     * `w_floor = 1.0 - (t_r - i_floor)`, `w_ceil = t_r - i_floor`。
     * **插值读取：** `v_r = H_{k-1}[i_floor] * w_floor + H_{k-1}[i_ceil] * w_ceil`
     * **（说明：** 这是一个 $r$ 维向量的加权求和，非常快速。)
-    * **聚合：** `v_agg = v_agg + v_r`。
-3.  **（说明：** `v_agg` 现在是 $r$ 维的，代表了从内存中检索到的所有“原始线索”。)
+* 对每个读取坐标 (t_r) 用两点插值从 (H_{k-1}) 取出 (r) 维向量 (v^{(j)})。
+* 堆叠为矩阵：`V_stack = [v^(1), ..., v^(K_r)]`，形状 `[K_r, r]`。
+* 展平拼接：`v_cat = reshape(V_stack, K_r * r)`。
 
 #### 阶段 4：生成“内部输出”
 
 * **动作：** 使用“读取门”过滤检索到的信息。
-* **计算：** `y_r = v_agg * g_output` (逐元素乘法)。
-* **（说明：** `y_r` 是一个 $r$ 维向量，代表内存核心在 $k$ 时刻的“最终思考结果”。)
+* 读取门：`g_read = MLP_O(z_k)`，形状 `K_r * r`，范围 `[0,1]`。
+* 逐元素门控：`y_cat = v_cat * g_read`。
 
 #### 阶段 5：出口投影 (Up-Projection)
 
 * **动作：** 将 $r$ 维的“内部结果” $y_r$ 转换回 $n$ 维的“公共”输出 $y_k$。
-* **计算：** `y_k = MLP_up(y_r)`
-* **（说明：** $y_k$ 是这个单元在 $k$ 时刻的**最终输出**，它现在是 $n$ 维的，可以被下一层（如果是堆叠的）或最终的预测头（Softmax）所使用。)
+* 门控后向量 y_cat 维度 K_r*r
+* 送入 MLP_up 映射到维度 n 得到 y_k
 
 #### 阶段 6：执行“遗忘”操作
 
