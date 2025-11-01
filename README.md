@@ -34,24 +34,24 @@ All complex, expensive memory operations (read, write, forget) occur in this lig
 
 At timestep k, the model receives the n-dimensional x_k and the M x r sandbox state H_{k-1}.
 
-#### Stage 1: Generate Sampling Positions
+#### Stage 1: Entrance Projection (Down-Projection)
 
-* Action: Generate a fixed number of sampling point positions based on the input x_k.
-* Computation: T_s = MLP_S(x_k) (Outputs K_s sampling positions t_sample, where K_s is a hyperparameter, e.g., a fixed number matching the total needs for context.)
-* Explanation: This step uses the n-dimensional x_k to produce positions for sampling from H_{k-1}.
+* Action: Convert the n-dimensional "public" input x_k into an r-dimensional "internal" working vector x_r.
+* Computation: x_r = MLP_down(x_k)
+* Explanation: This is a mandatory first step. x_k (n-dim) cannot directly interact with the r-dim sandbox H. We must first "translate" it into the memory core's "internal language" x_r (r-dim).
 
-#### Stage 1.5: Sample from H
+#### Stage 2: Generate Sampling Positions
+
+* Action: Generate a fixed number of sampling point positions based on the down-projected x_r.
+* Computation: T_s = MLP_S(x_r) (Outputs K_s sampling positions t_sample, where K_s is a hyperparameter, e.g., a fixed number matching the total needs for context.)
+* Explanation: This step uses the r-dimensional x_r to produce positions for sampling from H_{k-1}.
+
+#### Stage 2.5: Sample from H
 
 * Action: Sample values from H_{k-1} at the generated positions.
 * For each t_s in T_s: Compute interpolated sample v_s = H_{k-1}[floor(t_s)] * (1.0 - (t_s - floor(t_s))) + H_{k-1}[ceil(t_s)] * (t_s - floor(t_s)).
 * Stack samples: V_sample = stack([v_s for each t_s]), then flatten to v_sample_cat with shape K_s * r.
-* Explanation: These sampled values provide context from H_{k-1} conditioned on positions generated from x_k, without feeding the entire H.
-
-#### Stage 2: Entrance Projection (Down-Projection)
-
-* Action: Convert the n-dimensional "public" input x_k into an r-dimensional "internal" working vector x_r, using the sampled context.
-* Computation: x_r = MLP_down(concat(x_k, v_sample_cat))
-* Explanation: This is a mandatory step. x_k (n-dim) cannot directly interact with the r-dim sandbox H. We must first "translate" it into the memory core's "internal language" x_r (r-dim), incorporating sampled information from H.
+* Explanation: These sampled values provide context from H_{k-1} conditioned on positions generated from x_r, without feeding the entire H.
 
 #### Stage 3: Parallel Generation of All "Instructions"
 
@@ -196,7 +196,7 @@ This solution requires an "All-Addition" logic (i.e., the "forget" operation is 
 
 ### Slot Coordinate Channel
 
-Goal: Introduce position awareness to the addressable sandbox while keeping per-step O(1) controller decisions and without feeding the whole H into the controller, thus breaking slot permutation symmetry. This is adapted to the sampling-based input mechanism where sampling points and x_k are used to generate inputs.
+Goal: Introduce position awareness to the addressable sandbox while keeping per-step O(1) controller decisions and without feeding the whole H into the controller, thus breaking slot permutation symmetry. This is adapted to the sampling-based input mechanism where sampling points are generated after down-projection.
 
 Method: For each slot i in {0,...,M-1}, predefine a fixed coordinate embedding
 
@@ -206,7 +206,7 @@ e_i = PE(i/M) in R^{d_pos}
 
 Position-aware sampling (with coordinates):
 
-During Stage 1.5 (Sample from H), for each sampled value v_s at position t_s, compute an enhanced sampled value by incorporating the interpolated position embedding: e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s)), then concat(v_s, e_s) to form position-aware samples.
+During Stage 2.5 (Sample from H), for each sampled value v_s at position t_s, compute an enhanced sampled value by incorporating the interpolated position embedding: e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s)), then concat(v_s, e_s) to form position-aware samples.
 
 Stack the enhanced samples: V_sample_enhanced = stack([concat(v_s, e_s) for each t_s]), then flatten to v_sample_cat with shape K_s * (r + d_pos).
 
@@ -255,24 +255,24 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 
 在 k 时刻，模型接收 n 维的 x_k 和 M x r 的沙盘状态 H_{k-1}。
 
-#### 阶段 1：生成采样位置
+#### 阶段 1：入口投影 (Down-Projection)
 
-* 动作： 根据输入 x_k 生成固定数目的采样点位置。
-* 计算： T_s = MLP_S(x_k) （输出 K_s 个采样位置 t_sample，其中 K_s 为超参数，例如一个固定数目匹配上下文总需求。）
-* 说明： 此步骤使用 n 维的 x_k 来产生从 H_{k-1} 采样的位置。
+* 动作： 将 n 维的“公共”输入 x_k 转换为 r 维的“内部”工作向量 x_r。
+* 计算： x_r = MLP_down(x_k)
+* 说明： 这是必须的第一步。x_k（n 维）无法直接与 r 维的沙盘 H 交互。我们必须先将其“翻译”成内存核心的“内部语言” x_r（r 维）。
 
-#### 阶段 1.5：从 H 中采样
+#### 阶段 2：生成采样位置
+
+* 动作： 根据降维后的 x_r 生成固定数目的采样点位置。
+* 计算： T_s = MLP_S(x_r) （输出 K_s 个采样位置 t_sample，其中 K_s 为超参数，例如一个固定数目匹配上下文总需求。）
+* 说明： 此步骤使用 r 维的 x_r 来产生从 H_{k-1} 采样的位置。
+
+#### 阶段 2.5：从 H 中采样
 
 * 动作： 在生成的采样位置上从 H_{k-1} 中采样值。
 * 对于 T_s 中的每个 t_s： 计算插值采样 v_s = H_{k-1}[floor(t_s)] * (1.0 - (t_s - floor(t_s))) + H_{k-1}[ceil(t_s)] * (t_s - floor(t_s))。
 * 堆叠采样： V_sample = stack([v_s for each t_s])，然后展平为 v_sample_cat，形状 K_s * r。
-* 说明： 这些采样值提供了基于 x_k 生成的位置从 H_{k-1} 中提取的上下文，而无需输入整个 H。
-
-#### 阶段 2：入口投影 (Down-Projection)
-
-* 动作： 将 n 维的“公共”输入 x_k 转换为 r 维的“内部”工作向量 x_r，使用采样上下文。
-* 计算： x_r = MLP_down(concat(x_k, v_sample_cat))
-* 说明： 这是必须的一步。x_k（n 维）无法直接与 r 维的沙盘 H 交互。我们必须先将其“翻译”成内存核心的“内部语言” x_r（r 维），并融入从 H 采样的信息。
+* 说明： 这些采样值提供了基于 x_r 生成的位置从 H_{k-1} 中提取的上下文，而无需输入整个 H。
 
 #### 阶段 3：并行生成所有“指令”
 
@@ -422,7 +422,7 @@ Simulated Smooth RNN (SS-RNN)，这是一种用于序列处理的循环架构。
 
 ### 槽位坐标通道
 
-目标: 在不把整个 H 喂给控制器、且保持每步 O(1) 决策的前提下，为可寻址沙盘引入位置感，打破槽位的置换对称性。此方案适应于基于采样的输入机制，其中采样点和 x_k 用于生成输入。
+目标: 在不把整个 H 喂给控制器、且保持每步 O(1) 决策的前提下，为可寻址沙盘引入位置感，打破槽位的置换对称性。此方案适应于基于采样的输入机制，其中采样点在降维后生成。
 
 做法: 对每个槽位 i in {0,...,M-1}，预先定义固定的坐标嵌入
 
@@ -432,7 +432,7 @@ e_i = PE(i/M) in R^{d_pos}
 
 带坐标的位置感采样:
 
-在阶段 1.5（从 H 中采样）期间，对于每个在位置 t_s 的采样值 v_s，通过融入插值的坐标嵌入来计算增强的采样值：e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s))，然后 concat(v_s, e_s) 以形成位置感知采样。
+在阶段 2.5（从 H 中采样）期间，对于每个在位置 t_s 的采样值 v_s，通过融入插值的坐标嵌入来计算增强的采样值：e_s = PE(floor(t_s)/M) * (1.0 - (t_s - floor(t_s))) + PE(ceil(t_s)/M) * (t_s - floor(t_s))，然后 concat(v_s, e_s) 以形成位置感知采样。
 
 堆叠增强采样：V_sample_enhanced = stack([concat(v_s, e_s) for each t_s])，然后展平为 v_sample_cat，形状 K_s * (r + d_pos)。
 
